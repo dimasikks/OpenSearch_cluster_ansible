@@ -1,0 +1,15 @@
+- name: Установка кластера
+  import_tasks: install.yml
+  tags: [ "install", "never" ]
+
+- name: Удаление кластера
+  import_tasks: uninstall.yml
+  tags: [ "uninstall", "never" ]
+
+- name: Добавление ноды 
+  import_tasks: add_node.yml
+  tags: [ "add_node", "never" ]
+
+- name: Удаление ноды
+  import_tasks: del_node.yml
+  tags: [ "del_node", "never" ]

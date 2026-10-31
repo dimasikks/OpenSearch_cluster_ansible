@@ -1,0 +1,44 @@
+#!/bin/bash
+
+set -e
+
+if [ ! -f root-ca.pem ] || [ ! -f root-ca-key.pem ]; then
+  echo "Ошибка: не найдены файлы root-ca.pem и/или root-ca-key.pem"
+  echo "Сначала создайте корневой сертификат "
+  exit 1
+fi
+
+SUBJ="/C=CA/ST=RUSSIA/L=MOSCOW/O=<ex>/OU=<ex>"
+ADMIN_CN="admin"
+
+rm -f admin-key-temp.pem admin.csr admin.ext admin-key.pem admin.pem
+
+openssl genrsa -out admin-key-temp.pem 2048
+
+openssl pkcs8 -inform PEM -outform PEM -in admin-key-temp.pem -topk8 -nocrypt -v1 PBE-SHA1-3DES -out admin-key.pem
+
+openssl req -new -key admin-key.pem -subj "$SUBJ/CN=$ADMIN_CN" -out admin.csr
+
+cat > admin.ext <<EOF
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature, keyEncipherment
+extendedKeyUsage=clientAuth
+subjectAltName=DNS:localhost,IP:127.0.0.1
+1.2.3.4.5.5=ASN1:NULL
+EOF
+
+openssl x509 -req \
+  -in admin.csr \
+  -CA root-ca.pem \
+  -CAkey root-ca-key.pem \
+  -CAcreateserial \
+  -sha256 \
+  -out admin.pem \
+  -days 730 \
+  -extfile admin.ext
+
+rm -f admin-key-temp.pem admin.csr admin.ext
+
+chmod 600 admin-key.pem admin.pem
+
+echo "Админские сертификаты успешно созданы"

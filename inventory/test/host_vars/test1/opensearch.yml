@@ -1,0 +1,7 @@
+first_master: true
+
+node:
+  roles: [ "cluster_manager" ]
+
+vm:
+  max_map_count: 262144

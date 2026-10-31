@@ -1,0 +1,7 @@
+first_master: false
+
+node:
+  roles: [ "cluster_manager", "ingest", "data" ]
+
+vm:
+  max_map_count: 262144

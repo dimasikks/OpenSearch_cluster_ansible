@@ -1,0 +1,6 @@
+- name: OpenSearch
+  hosts: opensearch
+  gather_facts: true
+  become: yes
+  roles:
+     - role: ./roles/opensearch

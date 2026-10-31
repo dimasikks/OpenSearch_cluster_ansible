@@ -1,0 +1,40 @@
+---
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "{{ hashes['admin'] }}"
+  reserved: true
+  backend_roles:
+    - "admin"
+    - "all_access"
+  description: "Super admin user with full cluster access"
+
+local-admin:
+  hash: "{{ hashes['local-admin'] }}"
+  reserved: false
+  backend_roles:
+    - "admin"
+    - "all_access"
+  description: "Local administrator management"
+
+exporter-user:
+  hash: "{{ hashes['exporter-user'] }}"
+  reserved: false
+  backend_roles:
+    - "readall"
+    - "monitor"
+  description: "User for metrics exporters"
+
+opensearch-dashboards:
+  hash: "{{ hashes['opensearch-dashboards'] }}"
+  reserved: true
+  description: "OpenSearch Dashboards server user"
+
+vector:
+  hash: "{{ hashes['vector'] }}"
+  reserved: false
+  backend_roles:
+    - "logstash"
+  description: "Vector log shipper user"

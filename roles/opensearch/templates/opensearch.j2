@@ -1,0 +1,69 @@
+cluster.name: {{ cluster.name }}
+node.name: {{ inventory_hostname }}.passport.local
+node.roles: [{{ node.roles | join(', ') }}]
+path.data: {{ mount }}/opensearch
+path.logs: {{ mount }}/log/opensearch
+network.host: 0.0.0.0
+http.port: 9200
+discovery.seed_hosts:
+{% if del_node_name is defined %}
+{% for host in groups['opensearch'] | difference([del_node_name]) %}
+  - "{{ host }}.passport.local"
+{% endfor %}
+{% else %}
+{% for host in groups['opensearch'] %}
+  - "{{ host }}.passport.local"
+{% endfor %}
+{% endif %}
+cluster.initial_cluster_manager_nodes:
+{% for host in initial_cluster_manager_nodes %}
+  - "{{ host }}.passport.local"
+{% endfor %}
+
+plugins.security.audit.type: internal_opensearch
+plugins.security.audit.config.disabled_rest_categories: NONE
+plugins.security.audit.config.disabled_transport_categories: NONE
+ 
+plugins.security.disabled: false
+ 
+plugins.security.ssl.transport.pemcert_filepath: /etc/opensearch/ssl/{{ inventory_hostname }}.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/opensearch/ssl/{{ inventory_hostname }}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/opensearch/ssl/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/opensearch/ssl/{{ inventory_hostname }}.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/opensearch/ssl/{{ inventory_hostname }}-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/opensearch/ssl/root-ca.pem
+ 
+plugins.security.allow_unsafe_democertificates: true
+plugins.security.allow_default_init_securityindex: true
+ 
+plugins.security.authcz.admin_dn:
+  - 'C=CA,ST=RUSSIA,L=MOSCOW,O=<ex>,OU=<ex>,CN=admin'
+  - 'CN=admin,OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+ 
+plugins.security.restapi.roles_enabled: ["all_access", "security_rest_api_access","security_admin"]
+plugins.security.restapi.admin.enabled: true
+plugins.security.unsupported.restapi.allow_securityconfig_modification: true
+plugins.security.restapi.endpoints_disabled.securityconfig: false
+plugins.security.system_indices.enabled: true
+plugins.security.system_indices.indices: [".opendistro-alerting-config", ".opendistro-alerting-alert*", ".opendistro-anomaly-results*", ".opendistro-anomaly-detector*", ".opendistro-anomaly-checkpoints", ".opendistro-anomaly-detection-state", ".opendistro-reports-*", ".opendistro-notifications-*", ".opendistro-notebooks", ".opendistro-observability", ".opendistro-asynchronous-search-response*", ".opendistro-metadata-store"]
+ 
+plugins.security.nodes_dn:
+{% if del_node_name is defined %}
+{% for host in groups['opensearch'] | difference([del_node_name]) %}
+
+  - 'CN={{ host }}.passport.local,OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+  - 'CN={{ host }},OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+  - 'CN={{ hostvars[host].ansible_default_ipv4.address }},OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+
+{% endfor %}
+{% else %}
+{% for host in groups['opensearch'] %}
+
+  - 'CN={{ host }}.passport.local,OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+  - 'CN={{ host }},OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+  - 'CN={{ hostvars[host].ansible_default_ipv4.address }},OU=<ex>,O=<ex>,L=MOSCOW,ST=RUSSIA,C=CA'
+
+{% endfor %}
+{% endif %}

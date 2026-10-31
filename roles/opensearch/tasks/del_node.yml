@@ -1,0 +1,139 @@
+- name: Найти хост с del_node
+  ansible.builtin.set_fact:
+    del_node_name: "{{ hostvars | dict2items | selectattr('value.del_node', 'defined') | map(attribute='key') | first | default('') }}"
+
+- name: Обновление основной конфигурации
+  block:
+    - name: Подготовка массива для ролей
+      set_fact:
+        initial_cluster_manager_nodes: "{{ initial_cluster_manager_nodes | default([]) + [item] }}"
+      loop: "{{ groups['opensearch'] | difference([del_node_name]) }}"
+      when: 
+        - "'cluster_manager' in hostvars[item].node.roles"
+        - inventory_hostname != del_node_name
+
+    - name: Копирование конфигурации
+      ansible.builtin.template:
+        src: opensearch.j2
+        dest: /etc/opensearch/opensearch.yml
+      when: inventory_hostname != del_node_name
+
+- name: Получение текущего пароля для OpenSearch-dashboards
+  ansible.builtin.shell:
+    cmd: cat passwords | grep opensearch-dashboards | awk '{print $2}'
+  args: 
+    chdir: /etc/opensearch
+  register: opensearch_dashboards_password
+  when: first_master
+
+- name: Обновление конфигурации для OpenSearch-dashboards
+  ansible.builtin.template:
+    src: "{{ item.key }}"
+    dest: "/etc/opensearch-dashboards/{{ item.path }}"
+  loop:
+    - { "key": "opensearch-dashboards.j2", "path": "opensearch_dashboards.yml" }
+  when: first_master
+
+- name: Проверка OpenSearch
+  block:
+    - name: Запуск OpenSearch
+      ansible.builtin.service:
+        name: opensearch
+        state: restarted
+        enabled: true
+      when: inventory_hostname != del_node_name
+
+    - name: Проверить _cluster/health
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:9200/_cluster/health"
+        method: GET
+        client_cert: /etc/opensearch/ssl/admin.pem
+        client_key: /etc/opensearch/ssl/admin-key.pem
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: 200
+      register: cluster_health
+      until:
+        - cluster_health.status == 200
+        - cluster_health.json.status == "green"
+      retries: 45
+      delay: 10
+      when: first_master
+
+    - name: Проверить authinfo (Security)
+      ansible.builtin.uri:
+        url: "https://{{ ansible_default_ipv4.address }}:9200/_plugins/_security/authinfo"
+        method: GET
+        client_cert: /etc/opensearch/ssl/admin.pem
+        client_key: /etc/opensearch/ssl/admin-key.pem
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: 200
+      register: authinfo
+      until: authinfo.status == 200
+      retries: 45
+      delay: 10
+      when: first_master
+
+    - name: Проверить, что admin аутентифицирован
+      ansible.builtin.assert:
+        that:
+          - "'CN=admin' in authinfo.json.user_name"
+        fail_msg: "Не admin: {{ authinfo.json.user_name }}"
+        success_msg: "Admin аутентифицирован"
+      when: first_master
+
+- name: Проверка Dashboards
+  block:
+    - name: Запуск OpenSearch-dashboards
+      ansible.builtin.service:
+        name: opensearch-dashboards
+        state: restarted
+        enabled: true
+
+    - name: Проверить Dashboards /api/status
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:5601/api/status"
+        method: GET
+        url_username: opensearch-dashboards
+        url_password: "{{ opensearch_dashboards_password.stdout }}"
+        force_basic_auth: yes
+        validate_certs: no
+        status_code: 200
+      register: dashboards_status_api
+      until: dashboards_status_api.status == 200
+      retries: 45
+      delay: 10
+  when: first_master
+
+- name: Проверка HAProxy
+  block:
+    - name: Запуск HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted
+        enabled: true
+
+    - name: Проверить HAProxy (HTTP)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/"
+        method: GET
+        status_code: [200, 302]
+      register: haproxy_status
+      until: haproxy_status.status in [200, 302]
+      retries: 45
+      delay: 10
+
+    - name: Проверить HAProxy (HTTPS)
+      ansible.builtin.uri:
+        url: "https://127.0.0.1/"
+        method: GET
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: [200, 302]
+      register: haproxy_https
+      until: haproxy_https.status in [200, 302]
+      retries: 45
+      delay: 10
+      when: haproxy_ssl_enabled | default(false)
+  when: first_master

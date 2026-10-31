@@ -1,0 +1,26 @@
+logging.dest: {{ mount }}/log/opensearch-dashboards/opensearch_dashboards.log
+
+opensearch.hosts:
+{% if del_node_name is defined %}
+{% for host in groups['opensearch'] | difference([del_node_name]) %}
+  - "https://{{ hostvars[host].ansible_default_ipv4.address }}:9200"
+{% endfor %}
+{% else %}
+{% for host in groups['opensearch'] %}
+  - "https://{{ hostvars[host].ansible_default_ipv4.address }}:9200"
+{% endfor %}
+{% endif %}
+opensearch.ssl.verificationMode: none
+
+opensearch.username: opensearch-dashboards
+opensearch.password: {{ opensearch_dashboards_password.stdout if opensearch_dashboards_password is defined else passwords['opensearch-dashboards'] }}
+
+opensearch.requestHeadersWhitelist: [authorization, securitytenant]
+
+opensearch_security.multitenancy.enabled: true
+server.port: 5601
+server.host: '0.0.0.0'
+
+server.ssl.enabled: true
+server.ssl.certificate: /etc/opensearch-dashboards/ssl/{{ inventory_hostname }}.pem
+server.ssl.key: /etc/opensearch-dashboards/ssl/{{ inventory_hostname }}-key.pem

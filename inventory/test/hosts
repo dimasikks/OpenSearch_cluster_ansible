@@ -1,0 +1,18 @@
+---
+all:
+  children:
+    servers:
+      hosts:
+        test1: {}
+        test2: {}
+        test3: {}
+        test4: {}
+    db:
+      hosts: {}
+    opensearch:
+      hosts:
+        test1: {}
+        test2: {}
+        test3: {}
+        test4: {}
+

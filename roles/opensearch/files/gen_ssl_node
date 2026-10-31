@@ -1,0 +1,36 @@
+#! /bin/bash
+# Before running this script, make sure to replace the CN in the
+# node's distinguished name with a real DNS A record.
+
+node_name=$1
+host_name=$2
+domain_name=$3
+ip_addr=$4
+owner_user_name=$5
+
+SUBJ="/C=CA/ST=RUSSIA/L=MOSCOW/O=<ex>/OU=<ex>"
+
+rm -f "$node_name*"
+
+# Create a private key for the node certificate.
+openssl genrsa -out "$node_name-key-temp.pem" 2048
+
+# Convert the private key to PKCS#8.
+openssl pkcs8 -inform PEM -outform PEM -in "$node_name-key-temp.pem" -topk8 -nocrypt -v1 PBE-SHA1-3DES -out "$node_name-key.pem"
+
+# Create the CSR and replace the arguments passed to -subj so they reflect your specific host.
+# The CN should match a DNS A record for the host-do not use the hostname.
+openssl req -new -key "$node_name-key.pem" -subj "$SUBJ/CN=$domain_name" -out "$node_name.csr"
+
+# Create an extension file that defines a SAN DNS name for the host. This
+# should match the DNS A record of the host.
+sh -c "echo subjectAltName=DNS:$domain_name,DNS:$host_name,DNS:localhost,IP:$ip_addr > $node_name.ext"
+
+# Sign the node certificate with the root certificate and private key that you created earlier.
+openssl x509 -req -in "$node_name.csr" -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial -sha256 -out "$node_name.pem" -days 730 -extfile "$node_name.ext"
+
+# Remove all the temporary files that are no longer required
+rm -f *temp.pem *csr *ext
+
+# Make sure the remaining certificates are owned by the opensearch user
+chown "$owner_user_name":"$owner_user_name" "$node_name-key.pem" "$node_name.pem" root-ca-key.pem root-ca.pem root-ca.srl

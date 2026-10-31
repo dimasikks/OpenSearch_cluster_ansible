@@ -1,0 +1,420 @@
+- name: Отключение swap
+  ansible.builtin.shell:
+    cmd: "{{ item }}"
+  loop:
+    - swapoff -a
+    - sed -i '/\/swap/s/^/#/' /etc/fstab
+
+- name: Расширение возможностей RAM
+  ansible.builtin.shell:
+    cmd: "sysctl -w vm.max_map_count={{ vm.max_map_count }} && sysctl -p"
+  
+- name: Установка пакетов
+  ansible.builtin.shell:
+    cmd: zypper install -y opensearch openssl java-25-openjdk
+  ignore_errors: yes
+
+- name: Проверить, необходима ли генерация сертификатов
+  ansible.builtin.stat:
+    path: /etc/opensearch/ssl
+  register: ssl_dir
+
+- name: Подготовка сертификатов
+  block:
+    - name: Создание директории для сертификатов
+      ansible.builtin.file:
+        path: /etc/opensearch/ssl
+        state: directory
+        owner: opensearch
+        group: opensearch
+        mode: '0755'
+
+    - name: Копирование скриптов
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /etc/opensearch/ssl/{{ item }}.sh
+        mode: '0755'
+      loop:
+        - gen_ssl_admin
+        - gen_ssl_ca
+        - gen_ssl_node
+      when: first_master
+
+    - name: Создание корневого CA
+      ansible.builtin.shell:
+        cmd: bash gen_ssl_ca.sh {{ hostvars[inventory_hostname].ansible_default_ipv4.address }}
+      args:
+        chdir: /etc/opensearch/ssl
+      when: first_master
+
+    - name: Создание базовых сертификатов
+      ansible.builtin.shell:
+        cmd: bash gen_ssl_node.sh {{ item }} {{ item }} {{ item }}.passport.local {{ hostvars[item].ansible_default_ipv4.address }} opensearch
+      args:
+        chdir: /etc/opensearch/ssl
+      loop: "{{ groups['opensearch'] }}"
+      when: first_master
+
+    - name: Создание админских сертификатов
+      ansible.builtin.shell:
+        cmd: bash gen_ssl_admin.sh
+      args:
+        chdir: /etc/opensearch/ssl
+      when: first_master
+
+    - name: Копирование root-ca.pem на контроллер
+      ansible.builtin.fetch:
+        src: /etc/opensearch/ssl/root-ca.pem
+        dest: /tmp/root-ca.pem
+        flat: yes
+      when: first_master
+
+    - name: Копирование сертификатов всех нод на контроллер
+      ansible.builtin.fetch:
+        src: /etc/opensearch/ssl/{{ item }}.pem
+        dest: /tmp/{{ item }}.pem
+        flat: yes
+      loop: "{{ groups['opensearch'] }}"
+      when: first_master
+
+    - name: Забрать ключи всех нод на контроллер
+      ansible.builtin.fetch:
+        src: /etc/opensearch/ssl/{{ item }}-key.pem
+        dest: /tmp/{{ item }}-key.pem
+        flat: yes
+      loop: "{{ groups['opensearch'] }}"
+      when: first_master
+
+    - name: Разложить root-ca.pem по нодам
+      ansible.builtin.copy:
+        src: /tmp/root-ca.pem
+        dest: /etc/opensearch/ssl/root-ca.pem
+        owner: opensearch
+        group: opensearch
+        mode: '0744'
+      when: not first_master
+
+    - name: Разложить сертификаты по нодам
+      ansible.builtin.copy:
+        src: /tmp/{{ inventory_hostname }}.pem
+        dest: /etc/opensearch/ssl/{{ inventory_hostname }}.pem
+        owner: opensearch
+        group: opensearch
+        mode: '0700'
+      when: not first_master
+
+    - name: Разложить ключи по нодам
+      ansible.builtin.copy:
+        src: /tmp/{{ inventory_hostname }}-key.pem
+        dest: /etc/opensearch/ssl/{{ inventory_hostname }}-key.pem
+        owner: opensearch
+        group: opensearch
+        mode: '0700'
+      when: not first_master
+
+    - name: Очистить ключи
+      become: false
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: rm -f *.pem
+      args:
+        chdir: /tmp
+  when: not ssl_dir.stat.exists
+
+- name: Подготовка основной конфигурации
+  block:
+    - name: Подготовка директорий для хранения
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: opensearch
+        group: opensearch
+        mode: '0700'
+      loop: 
+        - "{{ mount }}/opensearch"
+        - "{{ mount }}/log/opensearch"
+
+    - name: Подготовка массива для ролей
+      set_fact:
+        initial_cluster_manager_nodes: "{{ initial_cluster_manager_nodes | default([]) + [item] }}"
+      loop: "{{ groups['opensearch'] }}"
+      when: "'cluster_manager' in hostvars[item].node.roles"
+
+    - name: Копирование конфигурации
+      ansible.builtin.template:
+        src: opensearch.j2
+        dest: /etc/opensearch/opensearch.yml
+
+- name: Подготовка JVM конфигурации
+  block:
+    - name: Копирование конфигурации
+      ansible.builtin.template:
+        src: jvm.options.j2
+        dest: /etc/opensearch/jvm.options
+
+- name: Подготовка log4j конфигурации
+  block:
+    - name: Копирование конфигурации
+      ansible.builtin.copy:
+        src: log4j.properties
+        dest: /etc/opensearch/log4j.properties
+
+- name: Проверить, необходима ли генерация паролей
+  ansible.builtin.stat:
+    path: /etc/opensearch/passwords
+  register: gen_pw
+
+- name: Генерация паролей и хешей
+  block:
+    - name: Сгенерировать пароли
+      ansible.builtin.shell:
+        cmd: openssl rand -base64 24
+      loop:
+        - admin
+        - local-admin
+        - exporter-user
+        - opensearch-dashboards
+        - vector
+      register: generated_passwords
+      no_log: true
+
+    - name: Собрать пароли в словарь
+      ansible.builtin.set_fact:
+        passwords: "{{ dict(generated_passwords.results | map(attribute='item') | zip(generated_passwords.results | map(attribute='stdout'))) }}"
+
+    - name: Сохранить пароли в файл на мастере
+      ansible.builtin.copy:
+        content: |
+          {% for user, password in passwords.items() %}
+          {{ user }}: {{ password }}
+          {% endfor %}
+        dest: /etc/opensearch/passwords
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Сгенерировать хеши паролей
+      ansible.builtin.shell:
+        cmd: /usr/share/opensearch/plugins/opensearch-security/tools/hash.sh -p "{{ item.value }}"
+      loop: "{{ passwords | dict2items }}"
+      register: generated_hashes
+
+    - name: Собрать хеши в словарь
+      ansible.builtin.set_fact:
+        hashes: "{{ dict(generated_hashes.results | map(attribute='item.key') | zip(generated_hashes.results | map(attribute='stdout_lines') | map('last'))) }}"
+
+    - name: Создать internal_users.yml
+      ansible.builtin.template:
+        src: internal_users.j2
+        dest: /etc/opensearch/opensearch-security/internal_users.yml
+        owner: opensearch
+        group: opensearch
+        mode: '0700'
+
+    - name: Сконфигурировать правила
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/etc/opensearch/opensearch-security/{{ item }}.yml"
+        owner: opensearch
+        group: opensearch
+        mode: '0700'
+      loop:
+        - roles
+        - roles_mapping
+  when: 
+    - first_master
+    - not gen_pw.stat.exists
+
+- name: Установка переменной для пароля, в случае если пароли уже сгенерированы
+  block:
+    - name: Получение текущего пароля для OpenSearch-dashboards
+      ansible.builtin.shell:
+        cmd: cat passwords | grep opensearch-dashboards | awk '{print $2}'
+      args: 
+        chdir: /etc/opensearch
+      register: opensearch_dashboards_password
+  when: 
+    - first_master
+    - gen_pw.stat.exists
+
+- name: Установка OpenSearch-dashboards
+  block:
+    - name: Установка пакетов
+      ansible.builtin.shell:
+        cmd: zypper install -y opensearch-dashboards
+      ignore_errors: yes
+
+    - name: Создание директории для логирования и для конфигурации
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: opensearch-dashboards
+        group: opensearch-dashboards
+        mode: '0755'
+      loop:
+        - "{{ mount }}/log/opensearch-dashboards"
+        - /etc/opensearch-dashboards
+
+    - name: Копирование конфигурации
+      ansible.builtin.template:
+        src: "{{ item.key }}"
+        dest: "/etc/opensearch-dashboards/{{ item.path }}"
+      loop:
+        - { "key": "opensearch-dashboards.j2", "path": "opensearch_dashboards.yml" }
+
+    - name: Копирование сертификатов для opensearch-dashboards
+      ansible.builtin.shell:
+        cmd: cp -ar . /etc/opensearch-dashboards/ssl/ && chown -R opensearch-dashboards:opensearch-dashboards /etc/opensearch-dashboards
+      args:
+        chdir: /etc/opensearch/ssl
+  when: first_master
+
+- name: Установка Haproxy для OpenSearch-dashboards
+  block:
+    - name: Установка пакетов
+      ansible.builtin.shell:
+        cmd: zypper install -y haproxy
+      ignore_errors: yes
+
+    - name: Копирование конфигурации
+      ansible.builtin.copy:
+        src: haproxy
+        dest: /etc/haproxy/haproxy.cfg
+  when: first_master
+
+- name: Создание директории для симлинков автовключения
+  ansible.builtin.file:
+    path: /etc/init.d/rc{{ item }}.d
+    state: directory
+    mode: '0755'
+  loop:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - S
+  when: first_master
+
+- name: Глобальня смена прав для блочника
+  ansible.builtin.shell:
+    cmd: chmod -R 755 {{ mount }}
+
+- name: Проверка OpenSearch
+  block:
+    - name: Запуск OpenSearch
+      ansible.builtin.service:
+        name: opensearch
+        state: restarted
+        enabled: true
+
+    - name: Проверить _cluster/health
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:9200/_cluster/health"
+        method: GET
+        client_cert: /etc/opensearch/ssl/admin.pem
+        client_key: /etc/opensearch/ssl/admin-key.pem
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: 200
+      register: cluster_health
+      until:
+        - cluster_health.status == 200
+        - cluster_health.json.status == "green"
+      retries: 45
+      delay: 10
+      when: first_master
+
+    - name: Проверить authinfo (Security)
+      ansible.builtin.uri:
+        url: "https://{{ ansible_default_ipv4.address }}:9200/_plugins/_security/authinfo"
+        method: GET
+        client_cert: /etc/opensearch/ssl/admin.pem
+        client_key: /etc/opensearch/ssl/admin-key.pem
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: 200
+      register: authinfo
+      until: authinfo.status == 200
+      retries: 45
+      delay: 10
+      when: first_master
+
+    - name: Проверить, что admin аутентифицирован
+      ansible.builtin.assert:
+        that:
+          - "'CN=admin' in authinfo.json.user_name"
+        fail_msg: "Не admin: {{ authinfo.json.user_name }}"
+        success_msg: "Admin аутентифицирован"
+      when: first_master
+
+    - name: Применить Security конфиг (internal_users, roles, roles_mapping и т.д.)
+      ansible.builtin.shell:
+        cmd: |
+          /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+            -cacert /etc/opensearch/ssl/root-ca.pem \
+            -cert /etc/opensearch/ssl/admin.pem \
+            -key /etc/opensearch/ssl/admin-key.pem \
+            -h 127.0.0.1 -p 9200 \
+            -cd /etc/opensearch/opensearch-security/ -icl -nhnv
+      register: securityadmin_result
+      until: securityadmin_result.rc == 0
+      retries: 10
+      delay: 10
+      when: first_master
+
+- name: Проверка Dashboards
+  block:
+    - name: Запуск OpenSearch-dashboards
+      ansible.builtin.service:
+        name: opensearch-dashboards
+        state: restarted
+        enabled: true
+
+    - name: Проверить Dashboards /api/status
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:5601/api/status"
+        method: GET
+        url_username: opensearch-dashboards
+        url_password: "{{ opensearch_dashboards_password.stdout if opensearch_dashboards_password is defined else passwords['opensearch-dashboards'] }}"
+        force_basic_auth: yes
+        validate_certs: no
+        status_code: 200
+      register: dashboards_status_api
+      until: dashboards_status_api.status == 200
+      retries: 45
+      delay: 10
+  when: first_master
+
+- name: Проверка HAProxy
+  block:
+    - name: Запуск HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        enabled: true
+        state: restarted
+
+    - name: Проверить HAProxy (HTTP)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/"
+        method: GET
+        status_code: [200, 302]
+      register: haproxy_status
+      until: haproxy_status.status in [200, 302]
+      retries: 45
+      delay: 10
+
+    - name: Проверить HAProxy (HTTPS)
+      ansible.builtin.uri:
+        url: "https://127.0.0.1/"
+        method: GET
+        ca_path: /etc/opensearch/ssl/root-ca.pem
+        validate_certs: no
+        status_code: [200, 302]
+      register: haproxy_https
+      until: haproxy_https.status in [200, 302]
+      retries: 45
+      delay: 10
+      when: haproxy_ssl_enabled | default(false)
+  when: first_master

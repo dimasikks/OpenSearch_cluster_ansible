@@ -1,0 +1,41 @@
+global
+    log /dev/log local0 info
+    log /dev/log local1 notice
+    maxconn 4096
+    user haproxy
+    group haproxy
+    tune.ssl.default-dh-param 2048
+
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    option forwardfor
+    option http-server-close
+    timeout connect 5s
+    timeout client 50s
+    timeout server 50s
+    retries 3
+
+# Фронтенд для OpenSearch Dashboards
+frontend opensearch_dashboards_frontend
+    bind *:80
+    mode http
+    http-request set-header X-Forwarded-Proto http
+    http-request set-header X-Forwarded-Port %[dst_port]
+    default_backend opensearch_dashboards_backend
+
+# Фронтенд для метрик в формате prometheus
+frontend prometheus_exporter
+    bind *:8405
+    mode http
+    option dontlog-normal
+    http-request use-service prometheus-exporter if { path /metrics }
+
+# Бэкенд с балансировкой
+backend opensearch_dashboards_backend
+    mode http
+    balance leastconn
+    cookie SERVERID insert indirect nocache
+    server dashboard 127.0.0.1:5601 ssl verify none cookie dashboard check inter 10s rise 2 fall 3

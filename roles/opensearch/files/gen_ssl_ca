@@ -1,0 +1,13 @@
+#! /bin/bash
+# Before running this script, make sure to replace the CN in the
+# node's distinguished name with a real DNS A record.
+
+rm -f root-ca*
+
+SUBJ="/C=CA/ST=RUSSIA/L=MOSCOW/O=<ex>/OU=<ex>"
+
+openssl genrsa -out root-ca-key.pem 2048
+
+sudo openssl req -new -x509 -sha256 -key root-ca-key.pem \
+  -subj "$SUBJ/CN=$1" \
+  -out root-ca.pem -days 730 \
